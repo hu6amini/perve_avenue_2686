@@ -135,6 +135,101 @@ var MessengerModule = (function(Utils, EventBus) {
     }
 
     // ------------------------------------------------------------------------
+    // CURRENT USER RESOLUTION (module-level, reusable by posts editor later)
+    // ------------------------------------------------------------------------
+    var _currentUserCache = null;
+
+    function getCurrentUserId() {
+        // Primary: body class "a<MID>" (server-rendered, reliable on every device)
+        var match = document.body.className.match(/\ba(\d{5,})\b/);
+        if (match) return match[1];
+
+        // Fallback: menuwrap (in case body class is ever unavailable)
+        var menuLink = document.querySelector('.menuwrap a[href*="MID="]');
+        if (menuLink) {
+            var m = menuLink.getAttribute('href').match(/MID=(\d+)/);
+            if (m) return m[1];
+        }
+        return null;
+    }
+
+    function fetchCurrentUserData() {
+        if (_currentUserCache) return Promise.resolve(_currentUserCache);
+        var mid = getCurrentUserId();
+        if (!mid) return Promise.resolve(null);
+
+        return fetch('/api.php?mid=' + mid)
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                var user = data['m' + mid] || data.info;
+                if (user) {
+                    user.mid = mid;
+                    _currentUserCache = user;
+                }
+                return user || null;
+            })
+            .catch(function (err) {
+                console.warn('[MessengerModule] User fetch failed:', err);
+                return null;
+            });
+    }
+
+    function optimizeAvatarUrl(url, width, height) {
+        if (!url || typeof url !== 'string') return null;
+        var trimmed = url.trim();
+        if (!/^(https?:)?\/\//i.test(trimmed)) return null;
+        if (trimmed === 'http' || trimmed === 'https' || trimmed === '//') return null;
+        if (trimmed.indexOf('weserv.nl') !== -1 || trimmed.indexOf('data:') === 0) return trimmed;
+
+        if (trimmed.charAt(0) === '/' && trimmed.charAt(1) === '/') {
+            trimmed = 'https:' + trimmed;
+        }
+        if (trimmed.indexOf('http://') === 0 && window.location.protocol === 'https:') {
+            trimmed = trimmed.replace('http://', 'https://');
+        }
+
+        return 'https://images.weserv.nl/?url=' + encodeURIComponent(trimmed) +
+            '&output=webp&maxage=1y&q=85&w=' + width + '&h=' + height +
+            '&fit=cover&a=attention&il';
+    }
+
+    function buildReplyingAsHeader(user) {
+        if (!user) return null;
+
+        var username = user.nickname || 'You';
+        var mid = user.mid;
+        var profileUrl = '/?act=Profile&MID=' + mid;
+        var avatarUrl = optimizeAvatarUrl(user.avatar, 36, 36);
+
+        var header = document.createElement('div');
+        header.className = 'modern-replying-as';
+
+        var avatarHtml;
+        if (avatarUrl) {
+            avatarHtml = '<img class="modern-replying-avatar" ' +
+                'src="' + escapeHtml(avatarUrl) + '" ' +
+                'alt="Avatar of ' + escapeHtml(username) + '" ' +
+                'width="36" height="36" loading="lazy" decoding="async">';
+        } else {
+            var initial = (username.charAt(0) || '?').toUpperCase();
+            avatarHtml = '<span class="modern-replying-avatar modern-replying-avatar--initial">' +
+                escapeHtml(initial) + '</span>';
+        }
+
+        header.innerHTML =
+            '<span class="modern-replying-label">Replying as:</span>' +
+            '<a href="' + escapeHtml(profileUrl) + '" class="modern-replying-user" rel="nofollow">' +
+                avatarHtml +
+                '<span class="modern-replying-name">' + escapeHtml(username) + '</span>' +
+            '</a>';
+
+        return header;
+    }
+
+    // ------------------------------------------------------------------------
     // CONVERTERS (Legacy BBCode ↔ HTML) – keep for loading existing messages
     // ------------------------------------------------------------------------
     function legacyToHtml(legacy) {
@@ -187,6 +282,11 @@ var MessengerModule = (function(Utils, EventBus) {
         container.className = 'modern-messenger-section';
         container.id = 'compose-section';
 
+        // Replying-as header placeholder (filled asynchronously below)
+        var replyingAsPlaceholder = document.createElement('div');
+        replyingAsPlaceholder.className = 'modern-replying-as-placeholder';
+        container.appendChild(replyingAsPlaceholder);
+
         // Recipient + Subject row
         var recipientRow = document.createElement('div');
         recipientRow.className = 'modern-recipient-row';
@@ -205,6 +305,17 @@ var MessengerModule = (function(Utils, EventBus) {
         var toolbar = document.createElement('div');
         toolbar.className = 'modern-editor-toolbar';
         container.appendChild(toolbar);
+
+        // Replying-as header — resolved asynchronously, inserted above the toolbar
+        fetchCurrentUserData().then(function (user) {
+            var header = buildReplyingAsHeader(user);
+            if (header && replyingAsPlaceholder.parentNode) {
+                replyingAsPlaceholder.parentNode.replaceChild(header, replyingAsPlaceholder);
+            } else if (replyingAsPlaceholder.parentNode) {
+                // No user data — remove the empty placeholder silently
+                replyingAsPlaceholder.remove();
+            }
+        });
 
         var editorElement = document.createElement('div');
         editorElement.id = 'tiptap-editor';
@@ -377,24 +488,24 @@ var MessengerModule = (function(Utils, EventBus) {
         emojiPickerPanel.className = 'modern-emoji-picker';
         emojiPickerPanel.style.cssText = 'position:absolute;bottom:100%;left:0;background:var(--surface-color);border:1px solid var(--border-color);border-radius:var(--radius);padding:var(--space-sm);z-index:1000;display:none;grid-template-columns:repeat(8,1fr);gap:var(--space-xs);width:320px;max-height:200px;overflow-y:auto;';
 
-// Helper: convert emoji to its hex code point(s) for Twemoji URL
-function emojiToCodePoint(emoji) {
-    var codePoints = Array.from(emoji).map(function(ch) {
-        return ch.codePointAt(0).toString(16);
-    });
-    // Filter out variation selector (FE0F) which Twemoji does not need
-    codePoints = codePoints.filter(function(cp) {
-        return cp !== 'fe0f';
-    });
-    return codePoints.join('-');
-}
+        // Helper: convert emoji to its hex code point(s) for Twemoji URL
+        function emojiToCodePoint(emoji) {
+            var codePoints = Array.from(emoji).map(function(ch) {
+                return ch.codePointAt(0).toString(16);
+            });
+            // Filter out variation selector (FE0F) which Twemoji does not need
+            codePoints = codePoints.filter(function(cp) {
+                return cp !== 'fe0f';
+            });
+            return codePoints.join('-');
+        }
 
         // Define emoji groups with names and emoji lists
         var emojiGroups = [
             { name: 'Emojis', emojis: [
-    // Smileys & emotions (core)
-    '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','😉','😊','😇','🥰','😍','🤩','😘','🥲','😏','😋','😛','😜','🤪','😝','🤗','🤭','🤫','🤔','🤤','🥳','😎','🤓','🧐','🙃','🤐','🤨','😒','🙄','😬','😌','😔','😪','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','😵','🤯','😕','😟','🙁','😮','😲','😳','🥺','😨','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','😤','😡','😠','🤬','😈','👿','💀','💩','🤡','👋','👌','👍','👎','✊','👏','🙏','💪','👀','🤦','🤷','🎉','❤️','💔','🔥','💯','💥'
-] }
+                // Smileys & emotions (core)
+                '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','😉','😊','😇','🥰','😍','🤩','😘','🥲','😏','😋','😛','😜','🤪','😝','🤗','🤭','🤫','🤔','🤤','🥳','😎','🤓','🧐','🙃','🤐','🤨','😒','🙄','😬','😌','😔','😪','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','😵','🤯','😕','😟','🙁','😮','😲','😳','🥺','😨','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','😤','😡','😠','🤬','😈','👿','💀','💩','🤡','👋','👌','👍','👎','✊','👏','🙏','💪','👀','🤦','🤷','🎉','❤️','💔','🔥','💯','💥'
+            ] }
         ];
 
         // Build the picker panel
@@ -665,99 +776,99 @@ function emojiToCodePoint(emoji) {
                     parseHTML() {
                         return [{ tag: 'span[data-type="link-preview"]' }];
                     },
-renderHTML({ node, HTMLAttributes }) {
-    var href = node.attrs.href;
-    var title = node.attrs.title;
-    var description = node.attrs.description;
-    var imageSrc = node.attrs.imageSrc;
+                    renderHTML({ node, HTMLAttributes }) {
+                        var href = node.attrs.href;
+                        var title = node.attrs.title;
+                        var description = node.attrs.description;
+                        var imageSrc = node.attrs.imageSrc;
 
-    var finalImageUrl = imageSrc;
-    if (imageSrc && imageSrc.startsWith('/')) {
-        try {
-            var urlObj = new URL(href);
-            finalImageUrl = urlObj.origin + imageSrc;
-        } catch (e) {
-            finalImageUrl = imageSrc;
-        }
-    }
+                        var finalImageUrl = imageSrc;
+                        if (imageSrc && imageSrc.startsWith('/')) {
+                            try {
+                                var urlObj = new URL(href);
+                                finalImageUrl = urlObj.origin + imageSrc;
+                            } catch (e) {
+                                finalImageUrl = imageSrc;
+                            }
+                        }
 
-    var hostname = '';
-    try {
-        var urlObj = new URL(href);
-        hostname = urlObj.hostname.replace(/^www\./, '');
-    } catch (e) {
-        hostname = href.replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, '');
-    }
-    var faviconUrl = 'https://www.google.com/s2/favicons?domain=' + hostname + '&sz=32';
-    var isRich = finalImageUrl && finalImageUrl.trim() !== '';
+                        var hostname = '';
+                        try {
+                            var urlObj = new URL(href);
+                            hostname = urlObj.hostname.replace(/^www\./, '');
+                        } catch (e) {
+                            hostname = href.replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, '');
+                        }
+                        var faviconUrl = 'https://www.google.com/s2/favicons?domain=' + hostname + '&sz=32';
+                        var isRich = finalImageUrl && finalImageUrl.trim() !== '';
 
-    function isGenericTitle(t, h) {
-        if (!t || t === h) return true;
-        var generic = ['just a moment', 'access denied', 'verification required', 'please wait', 'captcha', 'challenge', 'checking your browser'];
-        var lower = t.toLowerCase();
-        return generic.some(function(term) { return lower.indexOf(term) !== -1; });
-    }
+                        function isGenericTitle(t, h) {
+                            if (!t || t === h) return true;
+                            var generic = ['just a moment', 'access denied', 'verification required', 'please wait', 'captcha', 'challenge', 'checking your browser'];
+                            var lower = t.toLowerCase();
+                            return generic.some(function(term) { return lower.indexOf(term) !== -1; });
+                        }
 
-    function needsProxy(url) {
-        if (!url) return false;
-        var blocked = ['discordapp.com', 'cdn.discordapp.com', 'media.discordapp.net', 'github.com', 'raw.githubusercontent.com', 'redd.it', 'reddit.com', 'twimg.com', 'pbs.twimg.com'];
-        try {
-            var host = new URL(url).hostname;
-            return blocked.some(function(d) { return host.includes(d); });
-        } catch (_) { return false; }
-    }
+                        function needsProxy(url) {
+                            if (!url) return false;
+                            var blocked = ['discordapp.com', 'cdn.discordapp.com', 'media.discordapp.net', 'github.com', 'raw.githubusercontent.com', 'redd.it', 'reddit.com', 'twimg.com', 'pbs.twimg.com'];
+                            try {
+                                var host = new URL(url).hostname;
+                                return blocked.some(function(d) { return host.includes(d); });
+                            } catch (_) { return false; }
+                        }
 
-    if (!isRich) {
-        var showTitle = !isGenericTitle(title, href);
-        var titlePart = showTitle ? (' – ' + title) : '';
-        return [
-            'span',
-            { class: 'link-preview-simple', 'data-type': 'link-preview', ...HTMLAttributes },
-            [
-                'a',
-                { href: href, target: '_blank', rel: 'noopener noreferrer', class: 'simple-link' },
-                ['img', { src: faviconUrl, class: 'simple-favicon', alt: '', loading: 'lazy' }],
-                ['span', { class: 'simple-hostname' }, hostname],
-                ['span', { class: 'simple-title' }, titlePart]
-            ]
-        ];
-    }
+                        if (!isRich) {
+                            var showTitle = !isGenericTitle(title, href);
+                            var titlePart = showTitle ? (' – ' + title) : '';
+                            return [
+                                'span',
+                                { class: 'link-preview-simple', 'data-type': 'link-preview', ...HTMLAttributes },
+                                [
+                                    'a',
+                                    { href: href, target: '_blank', rel: 'noopener noreferrer', class: 'simple-link' },
+                                    ['img', { src: faviconUrl, class: 'simple-favicon', alt: '', loading: 'lazy' }],
+                                    ['span', { class: 'simple-hostname' }, hostname],
+                                    ['span', { class: 'simple-title' }, titlePart]
+                                ]
+                            ];
+                        }
 
-    var proxiedImage = finalImageUrl;
-    if (needsProxy(finalImageUrl)) {
-        proxiedImage = 'https://images.weserv.nl/?url=' + encodeURIComponent(finalImageUrl) + '&output=webp&q=85';
-    }
+                        var proxiedImage = finalImageUrl;
+                        if (needsProxy(finalImageUrl)) {
+                            proxiedImage = 'https://images.weserv.nl/?url=' + encodeURIComponent(finalImageUrl) + '&output=webp&q=85';
+                        }
 
-    return [
-        'span',
-        { class: 'link-preview-card', 'data-type': 'link-preview', ...HTMLAttributes },
-        [
-            'a',
-            { href: href, target: '_blank', rel: 'noopener noreferrer', class: 'link-preview-link' },
-            [
-                'span',
-                { class: 'link-preview-content' },
-                [
-                    'span',
-                    { class: 'embedded-link-image' },
-                    ['img', { src: proxiedImage, class: 'link-preview-image', loading: 'lazy', alt: '' }]
-                ],
-                [
-                    'span',
-                    { class: 'link-preview-text' },
-                    ['span', { class: 'link-preview-title' }, title || href],
-                    description ? ['span', { class: 'link-preview-description' }, description] : '',
-                    [
-                        'span',
-                        { class: 'link-preview-url-wrapper' },
-                        ['img', { src: faviconUrl, class: 'link-preview-favicon', alt: '' }],
-                        ['span', { class: 'link-preview-hostname' }, hostname]
-                    ]
-                ]
-            ]
-        ]
-    ];
-},
+                        return [
+                            'span',
+                            { class: 'link-preview-card', 'data-type': 'link-preview', ...HTMLAttributes },
+                            [
+                                'a',
+                                { href: href, target: '_blank', rel: 'noopener noreferrer', class: 'link-preview-link' },
+                                [
+                                    'span',
+                                    { class: 'link-preview-content' },
+                                    [
+                                        'span',
+                                        { class: 'embedded-link-image' },
+                                        ['img', { src: proxiedImage, class: 'link-preview-image', loading: 'lazy', alt: '' }]
+                                    ],
+                                    [
+                                        'span',
+                                        { class: 'link-preview-text' },
+                                        ['span', { class: 'link-preview-title' }, title || href],
+                                        description ? ['span', { class: 'link-preview-description' }, description] : '',
+                                        [
+                                            'span',
+                                            { class: 'link-preview-url-wrapper' },
+                                            ['img', { src: faviconUrl, class: 'link-preview-favicon', alt: '' }],
+                                            ['span', { class: 'link-preview-hostname' }, hostname]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ];
+                    },
                 });
 
                 const Spoiler = Node.create({
@@ -1308,61 +1419,61 @@ renderHTML({ node, HTMLAttributes }) {
     // ------------------------------------------------------------------------
     // CORE BUILDER
     // ------------------------------------------------------------------------
-function buildModernMessenger() {
-    var wrapper = document.getElementById('modern-forum-wrapper');
-    if (!wrapper) return;
-    if (document.getElementById('modern-messenger')) return;
+    function buildModernMessenger() {
+        var wrapper = document.getElementById('modern-forum-wrapper');
+        if (!wrapper) return;
+        if (document.getElementById('modern-messenger')) return;
 
-    // If a legacy .post element exists on the page, do not build the messenger
-    if (document.querySelector('.post')) {
-        console.warn('[MessengerModule] Legacy .post element found – skipping messenger');
-        return;
+        // If a legacy .post element exists on the page, do not build the messenger
+        if (document.querySelector('.post')) {
+            console.warn('[MessengerModule] Legacy .post element found – skipping messenger');
+            return;
+        }
+
+        var carousel = wrapper.querySelector('.carousel-wrapper');
+        var breadcrumb = document.getElementById('modern-breadcrumbs');
+
+        var messengerContainer = document.createElement('div');
+        messengerContainer.id = 'modern-messenger';
+        messengerContainer.className = 'modern-messenger';
+        var navContainer = document.createElement('nav');
+        navContainer.className = 'modern-messenger-nav';
+        var navItems = [
+            { text: 'Compose',  icon: 'fa-regular fa-pen-to-square', url: '/?act=Msg&CODE=04&c=660892', section: 'compose' },
+            { text: 'Messages', icon: 'fa-regular fa-envelope',       url: '/?act=Msg&CODE=01&c=660892', section: 'messages' },
+            { text: 'Contacts', icon: 'fa-regular fa-address-book',   url: '/?act=Msg&CODE=02&c=660892', section: 'contacts' }
+        ];
+        for (var i = 0; i < navItems.length; i++) {
+            var item = navItems[i];
+            var link = document.createElement('a');
+            link.href = item.url;
+            link.className = 'modern-nav-link' + (item.section === currentSection ? ' current' : '');
+            link.innerHTML = '<i class="' + item.icon + '" aria-hidden="true"></i><span class="modern-nav-text">' + item.text + '</span>';
+            navContainer.appendChild(link);
+        }
+        var mainContent = document.createElement('div');
+        mainContent.className = 'modern-messenger-main';
+        if (currentSection === 'compose') {
+            mainContent.appendChild(buildComposeSection());
+        } else if (currentSection === 'messages') {
+            mainContent.appendChild(buildModernMessagesSection());
+        } else {
+            mainContent.appendChild(buildModernContactsSection());
+        }
+        messengerContainer.appendChild(navContainer);
+        messengerContainer.appendChild(mainContent);
+
+        // Insert after breadcrumb if it exists, otherwise after carousel
+        if (breadcrumb) {
+            breadcrumb.insertAdjacentElement('afterend', messengerContainer);
+        } else if (carousel) {
+            carousel.insertAdjacentElement('afterend', messengerContainer);
+        } else {
+            wrapper.appendChild(messengerContainer);
+        }
+
+        console.log('[MessengerModule] Built for section: ' + currentSection);
     }
-
-    var carousel = wrapper.querySelector('.carousel-wrapper');
-    var breadcrumb = document.getElementById('modern-breadcrumbs');
-
-    var messengerContainer = document.createElement('div');
-    messengerContainer.id = 'modern-messenger';
-    messengerContainer.className = 'modern-messenger';
-    var navContainer = document.createElement('nav');
-    navContainer.className = 'modern-messenger-nav';
-    var navItems = [
-        { text: 'Compose',  icon: 'fa-regular fa-pen-to-square', url: '/?act=Msg&CODE=04&c=660892', section: 'compose' },
-        { text: 'Messages', icon: 'fa-regular fa-envelope',       url: '/?act=Msg&CODE=01&c=660892', section: 'messages' },
-        { text: 'Contacts', icon: 'fa-regular fa-address-book',   url: '/?act=Msg&CODE=02&c=660892', section: 'contacts' }
-    ];
-    for (var i = 0; i < navItems.length; i++) {
-        var item = navItems[i];
-        var link = document.createElement('a');
-        link.href = item.url;
-        link.className = 'modern-nav-link' + (item.section === currentSection ? ' current' : '');
-        link.innerHTML = '<i class="' + item.icon + '" aria-hidden="true"></i><span class="modern-nav-text">' + item.text + '</span>';
-        navContainer.appendChild(link);
-    }
-    var mainContent = document.createElement('div');
-    mainContent.className = 'modern-messenger-main';
-    if (currentSection === 'compose') {
-        mainContent.appendChild(buildComposeSection());
-    } else if (currentSection === 'messages') {
-        mainContent.appendChild(buildModernMessagesSection());
-    } else {
-        mainContent.appendChild(buildModernContactsSection());
-    }
-    messengerContainer.appendChild(navContainer);
-    messengerContainer.appendChild(mainContent);
-
-    // Insert after breadcrumb if it exists, otherwise after carousel
-    if (breadcrumb) {
-        breadcrumb.insertAdjacentElement('afterend', messengerContainer);
-    } else if (carousel) {
-        carousel.insertAdjacentElement('afterend', messengerContainer);
-    } else {
-        wrapper.appendChild(messengerContainer);
-    }
-
-    console.log('[MessengerModule] Built for section: ' + currentSection);
-}
 
     return {
         initialize: initialize,
