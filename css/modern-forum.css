@@ -2895,6 +2895,64 @@ section.modern-stats { flex-direction: column; width: 100%; }
   border-left-color: var(--primary-color);
   color: var(--primary-light);
 }
+/* ------------------------------------------------------------------
+   Replying-as header (compose section)
+   ------------------------------------------------------------------ */
+.modern-replying-as {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--pad-4) var(--pad-6);
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-color);
+    font-size: var(--text-sm);
+}
+
+.modern-replying-label {
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+    margin-right: var(--space-xs);
+}
+
+.modern-replying-user {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    text-decoration: none;
+    color: var(--text-primary);
+    font-weight: 600;
+    transition: color 0.2s ease;
+}
+.modern-replying-user:hover {
+    color: var(--primary-light);
+    text-decoration: none;
+}
+
+.modern-replying-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--primary-color);
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.modern-replying-avatar--initial {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--primary-color);
+    color: #fff;
+    font-size: calc(36px * 0.618);
+    font-weight: 600;
+    line-height: 1;
+}
+
+.modern-replying-name {
+    font-weight: 600;
+    color: inherit;
+}
 .modern-messenger-main {
   flex: 1;
   min-width: 0;
